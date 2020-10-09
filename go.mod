@@ -1,4 +1,4 @@
-module o2o
+module github.com/ohko/o2o
 
 go 1.15
 
