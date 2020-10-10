@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ohko/omsg"
@@ -30,13 +31,14 @@ type tunnelInfo struct {
 
 // user信息
 type userInfo struct {
-	userConn net.Conn // 浏览器连接
-	tunnel   *tunnelInfo
-	data     chan []byte
+	userConn   net.Conn // 浏览器连接
+	tunnel     *tunnelInfo
+	data       chan []byte
+	dataClosed int64 // 0=未关闭/1=已关闭
 }
 
 // Start 启动服务
-func (o *Server) Start(key, serverPort string) error {
+func (o *Server) Start(key, serverPort string, crc bool) error {
 	lServer.SetFlags(log.Lshortfile | log.Ldate | log.Ltime)
 	lServer.SetPrefix("S")
 	lServer.SetColor(true)
@@ -52,7 +54,7 @@ func (o *Server) Start(key, serverPort string) error {
 		lServer.Log4Trace("AES crypt disabled")
 	}
 
-	o.msg = omsg.NewServer(o)
+	o.msg = omsg.NewServer(o, crc)
 	go func() {
 		lServer.Log4Trace("server:", o.serverPort)
 		lServer.Log4Trace(o.msg.StartServer(o.serverPort))
@@ -110,15 +112,17 @@ func (o *Server) OmsgData(conn net.Conn, cmd, ext uint16, data []byte) {
 		client, _, data := deData(data)
 		lServer.Log0Debug("client server error:", string(data))
 		if user, ok := o.users.Load(client); ok {
+			if atomic.CompareAndSwapInt64(&user.(*userInfo).dataClosed, 0, 1) {
+				close(user.(*userInfo).data)
+			}
 			lServer.Log0Debug("close user:", client)
-			user.(*userInfo).userConn.Close()
 		}
 	}
 }
 
 // Send 原始数据加密后发送
 func (o *Server) Send(conn net.Conn, cmd, ext uint16, originData []byte) error {
-	return omsg.Send(conn, cmd, ext, aesCrypt(originData))
+	return o.msg.Send(conn, cmd, ext, aesCrypt(originData))
 }
 
 // 0.0.0.0:8080:192.168.1.238:50000 请求服务器开启8080端口代理192.168.1.238的5000端口
@@ -179,7 +183,9 @@ func (o *Server) newUser(user *userInfo) {
 
 	// 互相COPY数据
 	defer func() {
-		close(user.data)
+		if atomic.CompareAndSwapInt64(&user.dataClosed, 0, 1) {
+			close(user.data)
+		}
 		user.userConn.Close()
 		o.users.Delete(user.userConn.RemoteAddr().String())
 		// 通知user关闭
@@ -189,7 +195,10 @@ func (o *Server) newUser(user *userInfo) {
 		}
 	}()
 
-	go io.Copy(user.userConn, user)
+	go func() {
+		io.Copy(user.userConn, user)
+		user.userConn.Close()
+	}()
 	io.Copy(user, user.userConn)
 	lServer.Log0Debug("user end:", user.userConn.RemoteAddr().String())
 }
