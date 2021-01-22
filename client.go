@@ -20,6 +20,8 @@ type Client struct {
 	serverPort, proxyPort string
 	localServers          sync.Map // map[浏览器IP:Port + 本地服务IP:Port]本地服务连接
 	localServersCount     int64    // 连接数
+
+	localServersMutex sync.Map // map[浏览器IP:Port + 本地服务IP:Port]锁
 }
 
 // Start 启动客户端
@@ -126,6 +128,15 @@ func (o *Client) browserDataStream(browserAddr, serveAddr string, browserData []
 			}
 		}
 	}()
+
+	// 获取锁 (后面可以使用 pool)
+	if inter, ok := o.localServersMutex.LoadOrStore(browserAddr+serveAddr, &sync.Mutex{}); ok {
+		mutex := inter.(*sync.Mutex)
+		mutex.Lock()
+		defer mutex.Unlock()
+
+		defer o.localServersMutex.Delete(browserAddr + serveAddr)
+	}
 
 	// 此浏览器的请求是否已有本地服务连接
 	if _conn, ok := o.localServers.Load(browserAddr + serveAddr); ok {
