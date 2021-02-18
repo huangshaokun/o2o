@@ -35,6 +35,7 @@ type userInfo struct {
 	tunnel     *tunnelInfo
 	data       chan []byte
 	dataClosed int64 // 0=未关闭/1=已关闭
+	// mutex      sync.Mutex // 访问的锁 (实际用读写锁更好) // 防止在多协程下关闭 通道
 }
 
 // Start 启动服务
@@ -55,10 +56,13 @@ func (o *Server) Start(key, serverPort string, crc bool) error {
 	}
 
 	o.msg = omsg.NewServer(o, crc)
-	go func() {
-		lServer.Log4Trace("server:", o.serverPort)
-		lServer.Log4Trace(o.msg.StartServer(o.serverPort))
-	}()
+
+	lServer.Log4Trace("server:", o.serverPort)
+	err := o.msg.StartServer(o.serverPort)
+	if err != nil {
+		lServer.Log2Error("o.msg.StartServer:", err)
+		return err
+	}
 
 	return nil
 }
@@ -106,12 +110,19 @@ func (o *Server) OmsgData(conn net.Conn, cmd, ext uint16, data []byte) {
 	case cmdData:
 		client, _, data := deData(data)
 		if user, ok := o.users.Load(client); ok {
+			// user.(*userInfo).mutex.Lock()
+			// defer user.(*userInfo).mutex.Unlock()
+
+			// atomic.LoadInt64(&user.(*userInfo).dataClosed)
 			user.(*userInfo).data <- data
 		}
 	case cmdLocaSrveClose:
 		client, _, data := deData(data)
 		lServer.Log0Debug("client server error:", string(data))
 		if user, ok := o.users.Load(client); ok {
+			// user.(*userInfo).mutex.Lock()
+			// defer user.(*userInfo).mutex.Unlock()
+
 			if atomic.CompareAndSwapInt64(&user.(*userInfo).dataClosed, 0, 1) {
 				close(user.(*userInfo).data)
 			}
